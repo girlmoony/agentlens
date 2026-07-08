@@ -84,6 +84,7 @@ def _habit_score_summary_html(summaries: list) -> str:
         "session_not_split": "session not split",
         "context_budget_exceeded": "context budget exceeded",
         "mixed_project_session": "mixed project session",
+        "long_context_quality_risk": "long-context quality risk",
     }
     chips = "".join(
         f'<div class="stat"><div class="value">{counts.get(key, 0)}</div>'

@@ -173,5 +173,58 @@ class TestSummarizeSessionHabitIntegration(unittest.TestCase):
         self.assertEqual(summary.findings, [])
 
 
+class TestContextWindowFor(unittest.TestCase):
+    def test_known_model_uses_configured_window(self):
+        pricing = Pricing(
+            models=PRICING.models,
+            cache_multipliers=PRICING.cache_multipliers,
+            unknown_model_fallback=PRICING.unknown_model_fallback,
+            context_windows={"claude-haiku-4-5": 200_000, "claude-opus-4-8": 1_000_000},
+            unknown_model_context_window=200_000,
+        )
+        self.assertEqual(pricing.context_window_for("claude-opus-4-8"), 1_000_000)
+        self.assertEqual(pricing.context_window_for("claude-haiku-4-5"), 200_000)
+
+    def test_unknown_model_falls_back_to_configured_default(self):
+        pricing = Pricing(
+            models=PRICING.models,
+            cache_multipliers=PRICING.cache_multipliers,
+            unknown_model_fallback=PRICING.unknown_model_fallback,
+            context_windows={"claude-opus-4-8": 1_000_000},
+            unknown_model_context_window=123_456,
+        )
+        self.assertEqual(pricing.context_window_for("some-future-model"), 123_456)
+
+
+class TestSummarizeSessionQualityRisk(unittest.TestCase):
+    def test_long_context_quality_risk_merged_when_context_high_and_duplicate_read_present(self):
+        pricing = Pricing(
+            models=PRICING.models,
+            cache_multipliers=PRICING.cache_multipliers,
+            unknown_model_fallback=PRICING.unknown_model_fallback,
+            context_windows={"claude-sonnet-5": 1_000},
+        )
+        calls = [ToolCall(timestamp=_ts(i), name="Read", input={"file_path": "/a.py"}) for i in range(2)]
+        turn = Turn("m1", _ts(0), "claude-sonnet-5", 600, 0, 0, 0, tool_calls=calls)
+        summary = summarize_session(_session_with_turns([turn]), pricing)
+        types = [f["type"] for f in summary.findings]
+        self.assertIn("duplicate_read", types)
+        self.assertIn("long_context_quality_risk", types)
+
+    def test_no_quality_risk_when_context_low(self):
+        pricing = Pricing(
+            models=PRICING.models,
+            cache_multipliers=PRICING.cache_multipliers,
+            unknown_model_fallback=PRICING.unknown_model_fallback,
+            context_windows={"claude-sonnet-5": 1_000_000},
+        )
+        calls = [ToolCall(timestamp=_ts(i), name="Read", input={"file_path": "/a.py"}) for i in range(2)]
+        turn = Turn("m1", _ts(0), "claude-sonnet-5", 600, 0, 0, 0, tool_calls=calls)
+        summary = summarize_session(_session_with_turns([turn]), pricing)
+        types = [f["type"] for f in summary.findings]
+        self.assertIn("duplicate_read", types)
+        self.assertNotIn("long_context_quality_risk", types)
+
+
 if __name__ == "__main__":
     unittest.main()

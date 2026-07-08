@@ -21,6 +21,8 @@ class Pricing:
     cache_multipliers: dict
     unknown_model_fallback: str
     introductory_pricing: dict = field(default_factory=dict)
+    context_windows: dict = field(default_factory=dict)
+    unknown_model_context_window: int = 200_000
 
     @classmethod
     def load(cls, path: Path = PRICING_FILE) -> "Pricing":
@@ -30,6 +32,8 @@ class Pricing:
             cache_multipliers=data["cache_multipliers"],
             unknown_model_fallback=data["unknown_model_fallback"],
             introductory_pricing=data.get("introductory_pricing", {}),
+            context_windows=data.get("context_windows", {}),
+            unknown_model_context_window=data.get("unknown_model_context_window", 200_000),
         )
 
     def rate_for(self, model: str, as_of: Optional[date] = None) -> dict:
@@ -41,6 +45,9 @@ class Pricing:
             if as_of < valid_until:
                 return {"input": intro["input"], "output": intro["output"]}
         return self.models.get(model, self.models[self.unknown_model_fallback])
+
+    def context_window_for(self, model: str) -> int:
+        return self.context_windows.get(model, self.unknown_model_context_window)
 
 
 def turn_cost(turn: Turn, pricing: Pricing) -> dict:
@@ -100,7 +107,18 @@ def summarize_session(session: Session, pricing: Pricing) -> SessionSummary:
     tool_call_count = sum(len(t.tool_calls) for t in session.turns)
     models_used = sorted({t.model for t in session.turns})
 
-    habit_metrics = habits.compute_habit_metrics(session)
+    agent_findings = detect_waste_patterns(session)
+    habit_metrics = habits.compute_habit_metrics(session, context_window_resolver=pricing.context_window_for)
+
+    # Cross-cutting: "is this session's context both large *and* full of
+    # content the model itself flagged as redundant/irrelevant" needs
+    # visibility into the agent-side findings above, so it's computed here
+    # rather than inside habits.compute_habit_metrics.
+    known_finding_types = {f["type"] for f in agent_findings} | {f["type"] for f in habit_metrics.findings}
+    quality_risk = habits.detect_long_context_quality_risk(habit_metrics.context_timeline, known_finding_types)
+    if quality_risk:
+        habit_metrics.findings.append(quality_risk)
+    habit_metrics.habit_score = habits.habit_score(habit_metrics.findings)
 
     return SessionSummary(
         session_id=session.session_id,
@@ -115,7 +133,7 @@ def summarize_session(session: Session, pricing: Pricing) -> SessionSummary:
         cache_read_input_tokens=cache_read,
         total_cost=total_cost,
         models_used=models_used,
-        findings=detect_waste_patterns(session) + habit_metrics.findings,
+        findings=agent_findings + habit_metrics.findings,
         habit_metrics=habit_metrics,
     )
 
@@ -152,7 +170,11 @@ def _detect_duplicate_reads(session: Session) -> list:
             findings.append(
                 {
                     "type": "duplicate_read",
-                    "detail": f"{path} was read {count} times in this session",
+                    "detail": (
+                        f"{path} was read {count} times in this session — wasted tokens aside, Chroma's "
+                        "\"Context Rot\" study (2025, trychroma.com/research/context-rot) found that "
+                        "redundant/repeated content in context is itself a reliability risk, not just a cost one"
+                    ),
                     "severity": "low" if count <= 2 else "medium",
                 }
             )

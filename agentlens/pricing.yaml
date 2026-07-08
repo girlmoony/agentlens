@@ -40,3 +40,27 @@ cache_multipliers:
   read: 0.1
 
 unknown_model_fallback: claude-sonnet-5
+
+# Context window sizes (tokens) per model. Used only by the usage-habit
+# analysis in habits.py (context-growth timeline, budget-overrun detection) —
+# not used anywhere in the cost calculation above. Captured 2026-07-08 from
+# the Claude API model catalog (`/claude-api` skill's cached models table,
+# sourced from platform.claude.com/docs/en/about-claude/models/overview).
+# Haiku 4.5 is the one model in this catalog on the smaller 200K window;
+# every other current model here is 1M.
+context_windows:
+  claude-fable-5:    1000000
+  claude-mythos-5:   1000000
+  claude-opus-4-8:   1000000
+  claude-opus-4-7:   1000000
+  claude-opus-4-6:   1000000
+  claude-opus-4-5:   1000000
+  claude-sonnet-5:   1000000
+  claude-sonnet-4-6: 1000000
+  claude-sonnet-4-5: 1000000
+  claude-haiku-4-5:  200000
+
+# Conservative fallback for a model not in `context_windows` above (e.g. a
+# brand-new or internal model ID) — matches Haiku's smaller window rather
+# than assuming the larger 1M figure most current models share.
+unknown_model_context_window: 200000
