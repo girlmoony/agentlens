@@ -115,6 +115,63 @@ class TestMixedProjectSession(unittest.TestCase):
         self.assertNotIn("mixed_project_session", types)
 
 
+class TestContextWindowResolver(unittest.TestCase):
+    def test_per_model_window_changes_ratio_for_same_token_count(self):
+        """Same token count should read as a much higher ratio on a small-window
+        model (Haiku, 200K) than on a large-window one (Opus, 1M)."""
+        turns = [
+            Turn("m0", _ts(0), "claude-haiku-4-5", 150_000, 0, 0, 0),
+            Turn("m1", _ts(1), "claude-opus-4-8", 150_000, 0, 0, 0),
+        ]
+        resolver = {"claude-haiku-4-5": 200_000, "claude-opus-4-8": 1_000_000}.get
+        hm = habits.compute_habit_metrics(_session(turns), context_window_resolver=resolver)
+        ratios = {p.context_window: p.ratio for p in hm.context_timeline}
+        self.assertAlmostEqual(ratios[200_000], 0.75)
+        self.assertAlmostEqual(ratios[1_000_000], 0.15)
+
+    def test_default_resolver_used_when_none_supplied(self):
+        turns = [Turn("m0", _ts(0), "claude-sonnet-5", 100_000, 0, 0, 0)]
+        hm = habits.compute_habit_metrics(_session(turns))
+        self.assertEqual(hm.context_timeline[0].context_window, habits.DEFAULT_CONTEXT_WINDOW)
+
+
+class TestLongContextQualityRisk(unittest.TestCase):
+    def _high_context_timeline(self, ratio=0.55):
+        turns = [Turn("m0", _ts(0), "claude-sonnet-5", int(1_000_000 * ratio), 0, 0, 0)]
+        return habits._context_timeline(_session(turns), lambda _m: 1_000_000)
+
+    def test_flagged_when_context_high_and_noise_present(self):
+        timeline = self._high_context_timeline()
+        finding = habits.detect_long_context_quality_risk(timeline, {"duplicate_read"})
+        self.assertIsNotNone(finding)
+        self.assertEqual(finding["type"], "long_context_quality_risk")
+
+    def test_not_flagged_without_noise_signal(self):
+        timeline = self._high_context_timeline()
+        finding = habits.detect_long_context_quality_risk(timeline, set())
+        self.assertIsNone(finding)
+
+    def test_not_flagged_when_context_ratio_low_even_with_noise(self):
+        timeline = self._high_context_timeline(ratio=0.1)
+        finding = habits.detect_long_context_quality_risk(timeline, {"mixed_project_session"})
+        self.assertIsNone(finding)
+
+    def test_severity_escalates_with_ratio(self):
+        low_timeline = self._high_context_timeline(ratio=0.55)
+        high_timeline = self._high_context_timeline(ratio=0.85)
+        low_finding = habits.detect_long_context_quality_risk(low_timeline, {"duplicate_read"})
+        high_finding = habits.detect_long_context_quality_risk(high_timeline, {"duplicate_read"})
+        self.assertEqual(low_finding["severity"], "low")
+        self.assertEqual(high_finding["severity"], "medium")
+
+
+class TestHabitScorePublicFunction(unittest.TestCase):
+    def test_habit_score_is_public_and_callable_directly(self):
+        self.assertEqual(habits.habit_score([]), 100)
+        findings = [{"type": "context_budget_exceeded", "severity": "high"}]
+        self.assertLess(habits.habit_score(findings), 100)
+
+
 class TestHabitMetrics(unittest.TestCase):
     def test_habit_score_100_when_no_findings(self):
         turns = [_read_turn(f"a{i}", i, "/proj/src/auth/login.py") for i in range(3)]

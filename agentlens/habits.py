@@ -11,32 +11,88 @@ usage per turn, tool-call inputs, system boundary events). There is no
 ground truth for "the user changed topics" or "this session mixed two
 projects", so thresholds are deliberately conservative and documented next
 to their constants.
+
+Two pieces of external research inform (but do not mechanically dictate) the
+context-growth side of this module:
+
+- Chroma, "Context Rot: How Increasing Input Tokens Impacts LLM Performance"
+  (Kelly Hong, Anton Troynikov, Jeff Huber; Chroma, July 2025).
+  https://www.trychroma.com/research/context-rot
+  Tested 18 frontier models (Claude Opus 4/Sonnet 4/Sonnet 3.7/Sonnet
+  3.5/Haiku 3.5, GPT, Gemini, and Qwen3 families). The report explicitly
+  does *not* give a universal token count or percentage-of-window
+  threshold where degradation begins — it states performance grows
+  "increasingly unreliable" in a model- and task-dependent, non-uniform
+  way as input length grows, even on simple retrieval/replication tasks.
+  Two findings we *do* build on directly: (a) a single distractor already
+  measurably reduces accuracy vs. a distractor-free baseline, and adding
+  more distractors compounds the loss further; (b) in their LongMemEval
+  comparison, prompts trimmed to only the relevant content scored
+  significantly higher than the full, unfiltered prompt — i.e. irrelevant
+  content in context degrades accuracy independent of raw length.
+- Liu et al., "Lost in the Middle: How Language Models Use Long Contexts"
+  (Stanford; arXiv 2023, TACL 2024). https://cs.stanford.edu/~nfliu/papers/lost-in-the-middle.arxiv2023.pdf
+  Found a U-shaped position-sensitivity curve in multi-document QA: models
+  use information at the very start or end of their context far more
+  reliably than information placed in the middle, even when everything
+  fits comfortably inside the stated context window. This module does not
+  attempt to detect *where* in a session's context a fact lives (that
+  isn't recoverable from the JSONL log), but it's the reason
+  `long_context_quality_risk` below treats "the context is large" as a
+  standalone risk signal rather than only a cost one.
+
+Neither paper gives a number this module could cite as "the" degradation
+threshold, so `QUALITY_RISK_CONTEXT_RATIO` below is a deliberately
+conservative, explicitly-labeled heuristic — not a reproduction of a
+published figure.
 """
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Optional
+from typing import Callable, Optional
 
 from .log_reader import Session, Turn
 
 # Context-window warning bands, mirroring the 25/55/80/90% thresholds Claude
-# Code's own context-usage indicator warns at.
+# Code's own context-usage indicator warns at. These are cost/capacity bands
+# (how close is this session to its token budget), not an accuracy-degradation
+# curve — see the module docstring for why no such curve is encoded here.
 CONTEXT_NOTICE_RATIO = 0.25
 CONTEXT_WARNING_RATIO = 0.55
 CONTEXT_HIGH_RATIO = 0.80
 CONTEXT_CRITICAL_RATIO = 0.90
 
-# Conservative default context window (tokens) used when we have no better
-# figure for the model in play. Sessions rarely need per-model precision here
-# since this is a "did you run hot for a while" signal, not a billing figure.
+# Fallback context window (tokens) used only when no per-model resolver is
+# supplied (e.g. a standalone call in tests). Real callers should pass
+# metrics.Pricing.context_window_for so each turn is measured against the
+# window of the model that actually produced it.
 DEFAULT_CONTEXT_WINDOW = 200_000
 
 # A session must spend at least this many consecutive turns at/above the
 # "high" band before we call it a sustained budget overrun rather than a
 # brief, self-correcting spike.
 CONTEXT_BUDGET_EXCEEDED_TURNS = 5
+
+# Neither Chroma's Context Rot report nor Liu et al.'s "Lost in the Middle"
+# gives a universal token count or ratio at which quality degradation
+# begins — both explicitly frame it as model- and task-dependent. This ratio
+# is therefore *not* derived from either paper; it is a conservative,
+# deliberately-labeled halfway point, picked because Chroma's finding that
+# degradation can appear well before a window is full (i.e. before the
+# cost-oriented CONTEXT_HIGH_RATIO/CONTEXT_CRITICAL_RATIO bands above) means
+# waiting for those bands would miss the risk this finding is meant to
+# surface. Treat `long_context_quality_risk` as a qualitative nudge, not a
+# measured cutoff.
+QUALITY_RISK_CONTEXT_RATIO = 0.5
+
+# Which of the *other* findings we treat as the "distractor/irrelevant
+# content" signal from Chroma's report — a session with one of these AND an
+# elevated context ratio is exactly the "long context plus noise" combination
+# their distractor experiments and LongMemEval comparison both flagged as
+# worse than length alone.
+QUALITY_RISK_NOISE_FINDING_TYPES = {"duplicate_read", "low_cache_reuse", "mixed_project_session"}
 
 # Two turns' referenced directories are considered "the same topic" when
 # their Jaccard similarity is at least this high; below it, we call it a
@@ -57,8 +113,17 @@ _PENALTY_WEIGHTS = {
     "session_not_split": 15,
     "context_budget_exceeded": 20,
     "mixed_project_session": 15,
+    # Lower weight than the cost-grounded findings above: this one rests on
+    # a qualitative research finding rather than a measured cost figure.
+    "long_context_quality_risk": 10,
 }
 _SEVERITY_MULTIPLIER = {"low": 0.6, "medium": 1.0, "high": 1.5}
+
+ContextWindowResolver = Callable[[str], int]
+
+
+def _default_context_window_resolver(_model: str) -> int:
+    return DEFAULT_CONTEXT_WINDOW
 
 
 @dataclass
@@ -66,6 +131,7 @@ class ContextPoint:
     turn_index: int
     timestamp: Optional[datetime]
     context_tokens: int
+    context_window: int
     ratio: float
 
 
@@ -142,16 +208,18 @@ def _zone_label(dirs: set) -> str:
     return f"{ordered[0]} +{len(ordered) - 1} more"
 
 
-def _context_timeline(session: Session, context_window: int) -> list:
+def _context_timeline(session: Session, resolver: ContextWindowResolver) -> list:
     points = []
     for i, turn in enumerate(session.turns):
         tokens = turn.input_tokens + turn.cache_read_input_tokens + turn.cache_creation_input_tokens
+        window = resolver(turn.model) or DEFAULT_CONTEXT_WINDOW
         points.append(
             ContextPoint(
                 turn_index=i,
                 timestamp=turn.timestamp,
                 context_tokens=tokens,
-                ratio=tokens / context_window if context_window else 0.0,
+                context_window=window,
+                ratio=tokens / window,
             )
         )
     return points
@@ -180,9 +248,42 @@ def _detect_context_budget_finding(timeline: list) -> Optional[dict]:
     return {
         "type": "context_budget_exceeded",
         "detail": (
-            f"context usage peaked at {peak.ratio * 100:.0f}% of the ~{DEFAULT_CONTEXT_WINDOW:,} token "
+            f"context usage peaked at {peak.ratio * 100:.0f}% of the ~{peak.context_window:,} token "
             f"budget (turn {peak.turn_index}) and stayed at/above {CONTEXT_HIGH_RATIO * 100:.0f}% for "
             f"{best_run} consecutive turn(s) — consider a /clear or /compact before this point"
+        ),
+        "severity": severity,
+    }
+
+
+def detect_long_context_quality_risk(timeline: list, other_finding_types: set) -> Optional[dict]:
+    """Cross-cutting signal combining this session's context size with whether
+    it also triggered a "redundant/irrelevant content" finding elsewhere
+    (agent-side `duplicate_read`/`low_cache_reuse`, or this module's own
+    `mixed_project_session`) — the specific combination Chroma's distractor
+    experiments and LongMemEval comparison found compounds degradation beyond
+    what context length alone causes. See the module docstring for citations
+    and why `QUALITY_RISK_CONTEXT_RATIO` is a conservative heuristic, not a
+    measured threshold."""
+    if not timeline:
+        return None
+    peak = max(timeline, key=lambda p: p.ratio)
+    if peak.ratio < QUALITY_RISK_CONTEXT_RATIO:
+        return None
+    noise_types = QUALITY_RISK_NOISE_FINDING_TYPES & other_finding_types
+    if not noise_types:
+        return None
+
+    severity = "medium" if peak.ratio >= CONTEXT_HIGH_RATIO else "low"
+    return {
+        "type": "long_context_quality_risk",
+        "detail": (
+            f"context usage reached {peak.ratio * 100:.0f}% of the model's window (turn {peak.turn_index}) "
+            f"in a session that also triggered {', '.join(sorted(noise_types))} — Chroma's \"Context Rot\" "
+            "study (2025, trychroma.com/research/context-rot) found that distractor/irrelevant content "
+            "compounds accuracy loss beyond what length alone causes. No published research gives a "
+            "universal token threshold for when this starts, so treat this as a conservative, qualitative "
+            "signal rather than a precise cutoff"
         ),
         "severity": severity,
     }
@@ -303,7 +404,9 @@ def _detect_project_mixing(session: Session) -> tuple:
             "type": "mixed_project_session",
             "detail": (
                 f"{len(foreign_keys)} directories unrelated to this session's own project were touched "
-                f"({', '.join(sorted(foreign_keys)[:5])}) — consider a separate session per project"
+                f"({', '.join(sorted(foreign_keys)[:5])}) — consider a separate session per project. Beyond "
+                "the extra tokens, Chroma's \"Context Rot\" study found irrelevant context measurably lowers "
+                "response accuracy too, citing their focused-vs-full-prompt (LongMemEval) comparison"
             ),
             "severity": severity,
         }
@@ -317,7 +420,11 @@ def _cache_hit_rate(session: Session) -> Optional[float]:
     return (read / denom) if denom else None
 
 
-def _habit_score(findings: list) -> int:
+def habit_score(findings: list) -> int:
+    """0-100 score derived from habit-related findings (see _PENALTY_WEIGHTS).
+    Public so callers (e.g. metrics.summarize_session) can recompute it after
+    merging in findings — like long_context_quality_risk — that depend on
+    context beyond a single session's own habit findings."""
     score = 100.0
     for f in findings:
         weight = _PENALTY_WEIGHTS.get(f["type"])
@@ -327,13 +434,16 @@ def _habit_score(findings: list) -> int:
     return max(0, min(100, round(score)))
 
 
-def detect_habit_waste_patterns(session: Session) -> list:
+def detect_habit_waste_patterns(session: Session, context_window_resolver: Optional[ContextWindowResolver] = None) -> list:
     """Rule-based detection of cost waste caused by *how the user drives the
     session*, as opposed to metrics.detect_waste_patterns which looks at the
-    agent/log side."""
+    agent/log side. Does not include long_context_quality_risk, which needs
+    visibility into agent-side findings too — see
+    metrics.summarize_session / detect_long_context_quality_risk."""
+    resolver = context_window_resolver or _default_context_window_resolver
     findings = []
 
-    timeline = _context_timeline(session, DEFAULT_CONTEXT_WINDOW)
+    timeline = _context_timeline(session, resolver)
     budget_finding = _detect_context_budget_finding(timeline)
     if budget_finding:
         findings.append(budget_finding)
@@ -350,17 +460,31 @@ def detect_habit_waste_patterns(session: Session) -> list:
     return findings
 
 
-def compute_habit_metrics(session: Session, context_window: int = DEFAULT_CONTEXT_WINDOW) -> HabitMetrics:
-    """Compute the full set of usage-habit metrics and findings for one session."""
+def compute_habit_metrics(
+    session: Session, context_window_resolver: Optional[ContextWindowResolver] = None
+) -> HabitMetrics:
+    """Compute the full set of usage-habit metrics and findings for one
+    session. `context_window_resolver` maps a model ID to its context window
+    in tokens (see metrics.Pricing.context_window_for) — pass it whenever
+    real per-model sizing matters; it defaults to a flat 200K fallback."""
+    resolver = context_window_resolver or _default_context_window_resolver
     duration = (session.end - session.start).total_seconds() if session.start and session.end else 0.0
-    timeline = _context_timeline(session, context_window)
+    timeline = _context_timeline(session, resolver)
     peak = max(timeline, key=lambda p: p.ratio) if timeline else None
 
     zones, shifts = _detect_topic_zones(session)
     undisciplined = [s for s in shifts if not s["disciplined"]]
-    foreign_keys, mixing_score, _mixed_finding = _detect_project_mixing(session)
+    foreign_keys, mixing_score, mixed_finding = _detect_project_mixing(session)
 
-    findings = detect_habit_waste_patterns(session)
+    findings = []
+    budget_finding = _detect_context_budget_finding(timeline)
+    if budget_finding:
+        findings.append(budget_finding)
+    split_finding = _detect_session_not_split_finding(shifts)
+    if split_finding:
+        findings.append(split_finding)
+    if mixed_finding:
+        findings.append(mixed_finding)
 
     return HabitMetrics(
         session_id=session.session_id,
@@ -377,5 +501,5 @@ def compute_habit_metrics(session: Session, context_window: int = DEFAULT_CONTEX
         foreign_project_keys=foreign_keys,
         project_mixing_score=mixing_score,
         findings=findings,
-        habit_score=_habit_score(findings),
+        habit_score=habit_score(findings),
     )
