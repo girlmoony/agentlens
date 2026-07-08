@@ -12,3 +12,7 @@ dist/
 
 # Generated reports
 *.html
+
+# Internal dev notes carried over from the pre-split project — not meant
+# for this public repo.
+/docs/
