@@ -21,7 +21,15 @@ cost accounting directly against the log format Claude Code already writes.
 pip install -r requirements.txt
 ```
 
-No other setup is required — AgentLens only reads local files.
+No other setup is required — AgentLens only reads local files. This also
+installs the `mcp` SDK needed for the [MCP server](#mcp-server) below.
+
+To get the `agentlens` / `agentlens-mcp` console scripts (used in the MCP
+client config examples below), install the package itself instead:
+
+```bash
+pip install -e .
+```
 
 ## Usage
 
@@ -39,6 +47,98 @@ python -m agentlens.cli report --since 30d -o report.html
 `--since` accepts `Nh` / `Nd` / `Nw` (hours/days/weeks). Omit it to scan all
 available history. `--projects-dir` overrides the default
 `~/.claude/projects` location if your logs live elsewhere.
+
+## MCP Server
+
+AgentLens also runs as an [MCP](https://modelcontextprotocol.io) server
+(`agentlens/mcp_server.py`), so MCP-aware clients — Claude Code, Codex CLI,
+GitHub Copilot Chat, etc. — can query session cost/efficiency data directly
+instead of shelling out to the CLI. It reuses the exact same
+`log_reader.py`/`metrics.py`/`habits.py`/`report.py` logic as the CLI; the
+`scan`/`report` commands above are unaffected and keep working as before.
+
+Built on the official [`mcp`](https://pypi.org/project/mcp/) Python SDK
+(confirmed on PyPI; `mcp>=1.2.0` in `requirements.txt`/`pyproject.toml`),
+using its `FastMCP` high-level API over the standard **stdio** transport.
+
+### Tools
+
+| Tool | Description |
+|---|---|
+| `scan_sessions(since="7d", projects_dir=None)` | Per-session token usage, USD cost, and waste-pattern findings (same data as `scan --json`). |
+| `generate_report(since="30d", output_path=None, projects_dir=None)` | Generates the self-contained HTML report and returns its file path. |
+| `get_habit_score(since="7d", projects_dir=None)` | Average usage-habit score, a breakdown of how many sessions hit each habit finding, and the lowest-scoring sessions worth investigating first. |
+
+All three accept the same `since` format as the CLI (`Nh`/`Nd`/`Nw`, or
+`None`/omitted for all history) and an optional `projects_dir` override.
+
+### Running it directly
+
+```bash
+python -m agentlens.mcp_server
+```
+
+This starts the server on stdio and blocks — it's meant to be launched by an
+MCP client, not run interactively. After installing the package
+(`pip install -e .`, via `pyproject.toml`), the same server is also
+available as the `agentlens-mcp` console script, which avoids depending on
+the client's working directory.
+
+### Claude Code
+
+```bash
+claude mcp add --transport stdio agentlens -- python -m agentlens.mcp_server
+```
+
+Or add directly to `.mcp.json` (project scope) / `~/.claude.json` (user
+scope):
+
+```json
+{
+  "mcpServers": {
+    "agentlens": {
+      "type": "stdio",
+      "command": "agentlens-mcp"
+    }
+  }
+}
+```
+
+(Use `"command": "python", "args": ["-m", "agentlens.mcp_server"]` instead
+if you haven't installed the package and are running from the repo — Claude
+Code needs a matching working directory in that case.)
+
+### Codex CLI
+
+Codex reads MCP servers from `[mcp_servers.<name>]` tables in
+`~/.codex/config.toml` (or a project-scoped `.codex/config.toml` for
+trusted projects):
+
+```toml
+[mcp_servers.agentlens]
+command = "agentlens-mcp"
+```
+
+### GitHub Copilot (VS Code)
+
+VS Code's Copilot Chat reads MCP servers from `.vscode/mcp.json` at the
+workspace root — note the root key is `servers`, not `mcpServers` (VS Code's
+own naming, different from Claude Code's):
+
+```json
+{
+  "servers": {
+    "agentlens": {
+      "command": "agentlens-mcp"
+    }
+  }
+}
+```
+
+Other MCP-compatible clients follow a similar shape (a `command` — and
+`args` if not using the installed console script — for a stdio server);
+consult the client's own docs for its exact config file location and key
+name if it isn't one of the three above.
 
 ## What it detects
 
