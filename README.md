@@ -89,8 +89,13 @@ precise cost figure — the findings and their `detail` text are the
 authoritative explanation. `scan` and `report` both show the average habit
 score across the scanned sessions, and the HTML report shows it per-session
 plus a breakdown of how many sessions hit each habit finding.
+`scan --json` additionally includes `habit_score`, `peak_context_ratio`,
+`cache_hit_rate`, `topic_shift_count`, and `undisciplined_shift_count` per
+session.
 
-The HTML report also charts, per flagged session: a **context growth
+### Usage-habit visualizations
+
+The HTML report charts, per flagged session: a **context growth
 timeline** (context-usage ratio per turn, with the 55/80/90% bands and the
 80%+ danger zone shaded) and a **topic timeline** — a Gantt-style view of
 each session's turns colored by topic zone, with a marker at every topic
