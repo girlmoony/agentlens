@@ -9,6 +9,7 @@ from typing import Optional
 
 import yaml
 
+from . import habits
 from .log_reader import Session, Turn
 
 PRICING_FILE = Path(__file__).parent / "pricing.yaml"
@@ -87,6 +88,7 @@ class SessionSummary:
     total_cost: float
     models_used: list
     findings: list = field(default_factory=list)
+    habit_metrics: object = None
 
 
 def summarize_session(session: Session, pricing: Pricing) -> SessionSummary:
@@ -97,6 +99,8 @@ def summarize_session(session: Session, pricing: Pricing) -> SessionSummary:
     total_cost = sum(turn_cost(t, pricing)["total_cost"] for t in session.turns)
     tool_call_count = sum(len(t.tool_calls) for t in session.turns)
     models_used = sorted({t.model for t in session.turns})
+
+    habit_metrics = habits.compute_habit_metrics(session)
 
     return SessionSummary(
         session_id=session.session_id,
@@ -111,7 +115,8 @@ def summarize_session(session: Session, pricing: Pricing) -> SessionSummary:
         cache_read_input_tokens=cache_read,
         total_cost=total_cost,
         models_used=models_used,
-        findings=detect_waste_patterns(session),
+        findings=detect_waste_patterns(session) + habit_metrics.findings,
+        habit_metrics=habit_metrics,
     )
 
 

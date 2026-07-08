@@ -2,7 +2,7 @@ import unittest
 from datetime import datetime, timezone
 
 from agentlens.log_reader import Session, Turn, ToolCall
-from agentlens.metrics import Pricing, turn_cost, detect_waste_patterns
+from agentlens.metrics import Pricing, turn_cost, detect_waste_patterns, summarize_session
 
 PRICING = Pricing(
     models={
@@ -150,6 +150,27 @@ class TestWastePatterns(unittest.TestCase):
         findings = detect_waste_patterns(_session_with_turns(turns))
         types = [f["type"] for f in findings]
         self.assertNotIn("batchable_tool_calls", types)
+
+
+class TestSummarizeSessionHabitIntegration(unittest.TestCase):
+    """summarize_session must fold habits.py's findings into the same
+    SessionSummary.findings list as the agent/log-side patterns, and expose
+    the full HabitMetrics via habit_metrics — report.py and cli.py both
+    depend on that shape."""
+
+    def test_habit_findings_included_in_summary_findings(self):
+        turns = [Turn(f"m{i}", _ts(i), "claude-sonnet-5", 170_000, 100, 0, 0) for i in range(6)]
+        summary = summarize_session(_session_with_turns(turns), PRICING)
+        types = [f["type"] for f in summary.findings]
+        self.assertIn("context_budget_exceeded", types)
+        self.assertIsNotNone(summary.habit_metrics)
+        self.assertLess(summary.habit_metrics.habit_score, 100)
+
+    def test_healthy_session_keeps_full_habit_score(self):
+        turns = [Turn(f"m{i}", _ts(i), "claude-sonnet-5", 100, 100, 0, 0) for i in range(3)]
+        summary = summarize_session(_session_with_turns(turns), PRICING)
+        self.assertEqual(summary.habit_metrics.habit_score, 100)
+        self.assertEqual(summary.findings, [])
 
 
 if __name__ == "__main__":
