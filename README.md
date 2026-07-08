@@ -59,14 +59,13 @@ driven*, rather than by what the agent does within it:
 
 - **context_budget_exceeded** — context usage (`input_tokens +
   cache_read_input_tokens + cache_creation_input_tokens` for a turn, as a
-  fraction of a conservative 200K-token budget) peaked at 90%+, or stayed at
-  80%+ for 5+ consecutive turns, without a `/clear` or `/compact` in
-  between. Mirrors the 25/55/80/90% warning bands Claude Code's own
-  context-usage indicator uses. The 200K figure is a flat, conservative
-  default rather than the real context window of the model(s) used in the
-  session, so on models with a larger window the reported ratio can exceed
-  100% — read it as "how hot did this session run" rather than an exact
-  percentage of the actual limit.
+  fraction of *that turn's own model's* context window — see
+  [Context window sizing](#context-window-sizing) below) peaked at 90%+, or
+  stayed at 80%+ for 5+ consecutive turns, without a `/clear` or `/compact`
+  in between. Mirrors the 25/55/80/90% warning bands Claude Code's own
+  context-usage indicator uses. This is a cost/capacity signal (how close to
+  the token budget did this session run), not an accuracy one — see
+  `long_context_quality_risk` below for that angle.
 - **session_not_split** — the session changed topic (see below) at least
   twice without a `/clear`, `/compact`, or new session in between, so
   context kept accumulating across unrelated work instead of being reset.
@@ -76,14 +75,79 @@ driven*, rather than by what the agent does within it:
 - **mixed_project_session** — two or more directories unrelated to the
   session's own project (i.e. that don't share any of the project folder's
   name tokens) were touched in the same session — a sign unrelated work got
-  mixed into one context instead of using a session per project.
+  mixed into one context instead of using a session per project. Beyond the
+  token cost, this is also flagged as a possible quality risk — see
+  [Context Rot research](#context-rot-research) below.
+- **long_context_quality_risk** — context usage reached 50%+ of the model's
+  window *and* the same session also triggered `duplicate_read`,
+  `low_cache_reuse`, or `mixed_project_session`. This combination — a large
+  context plus redundant/irrelevant content in it — is what external
+  research (below) found compounds accuracy loss beyond what context length
+  alone causes. There is no published token threshold for when this
+  actually starts, so this finding is explicitly a conservative, qualitative
+  nudge, not a measured cutoff — see [Context Rot research](#context-rot-research).
+
+### Context window sizing
+
+Each turn's context-usage ratio is computed against *that turn's own
+model's* real context window, looked up from a new `context_windows` section
+in `pricing.yaml` (populated the same way as the cost tables — see
+[Pricing logic](#pricing-logic)). A session that switches models mid-way
+(rare, but seen in real logs) is scored per-turn against the model that
+actually produced that turn, rather than one flat number for the whole
+session. Models not in the table fall back to a conservative
+`unknown_model_context_window` (200K) rather than assuming the larger figure
+most current models share.
+
+### Context Rot research
+
+`context_budget_exceeded` and `long_context_quality_risk` are informed by
+two pieces of external research on context-length degradation, cited
+directly in code comments and finding `detail` text so the claims stay
+traceable:
+
+- **Chroma, ["Context Rot: How Increasing Input Tokens Impacts LLM
+  Performance"](https://www.trychroma.com/research/context-rot)** (Kelly
+  Hong, Anton Troynikov, Jeff Huber; July 2025). Tested 18 frontier models.
+  **Explicitly does not give a universal token count or percentage-of-window
+  threshold** where degradation begins — it reports that reliability
+  declines in a non-uniform, model- and task-dependent way as input grows,
+  even on simple retrieval tasks. Two findings this project *does* encode
+  directly: (1) a single distractor already measurably reduces accuracy
+  vs. a distractor-free baseline, and additional distractors compound the
+  loss further; (2) in their LongMemEval comparison, prompts trimmed to only
+  the relevant content scored significantly higher than the full,
+  unfiltered prompt — irrelevant context degrades accuracy independent of
+  raw length.
+- **Liu et al., ["Lost in the Middle: How Language Models Use Long
+  Contexts"](https://cs.stanford.edu/~nfliu/papers/lost-in-the-middle.arxiv2023.pdf)**
+  (Stanford; arXiv 2023, TACL 2024). Found a U-shaped position-sensitivity
+  curve — models use information at the very start or end of context far
+  more reliably than information in the middle, even well inside the stated
+  context window. AgentLens can't recover *where* in a session's context a
+  given fact lives from the JSONL log, so this isn't mechanically detected;
+  it's the reason `long_context_quality_risk` treats "the context is large"
+  as a standalone risk rather than only a cost one.
+
+**Because neither paper gives a reproducible numeric threshold, AgentLens
+does not pretend to have one.** `QUALITY_RISK_CONTEXT_RATIO` (50% of the
+model's window) in `agentlens/habits.py` is explicitly documented in code as
+a conservative, made-up-for-this-project heuristic — not a published
+figure — and `long_context_quality_risk`'s `detail` text repeats that
+caveat every time it fires. Treat both context-based habit findings as
+directional signals to investigate, not precise measurements.
 
 ### Usage-habit score
 
 Each session gets a 0–100 **habit score**, starting at 100 and losing points
 for each habit finding above (15 for `session_not_split`, 20 for
-`context_budget_exceeded`, 15 for `mixed_project_session`), scaled by
-severity (0.6x low, 1x medium, 1.5x high) and floored at 0. It's a rough,
+`context_budget_exceeded`, 15 for `mixed_project_session`, 10 for
+`long_context_quality_risk` — weighted lower since it rests on a qualitative
+research finding rather than a measured cost figure), scaled by severity
+(0.6x low, 1x medium, 1.5x high) and floored at 0. It's a single composite
+score rather than separate cost/quality axes, deliberately: the weighting
+already reflects "the cost-grounded findings count more than the
+research-informed one" without needing two numbers to track. It's a rough,
 at-a-glance signal for "was this session driven efficiently," not a
 precise cost figure — the findings and their `detail` text are the
 authoritative explanation. `scan` and `report` both show the average habit
@@ -128,6 +192,11 @@ cache write/read multipliers, matching Anthropic's published API pricing:
 - **Unknown models** fall back to a configurable default rate
   (`unknown_model_fallback`) rather than erroring, so a new or internal
   model name in the logs doesn't crash the scan.
+- **Context windows** (`context_windows` section, plus
+  `unknown_model_context_window` as the fallback) hold each model's real
+  context window in tokens. These aren't used for cost at all — they only
+  feed the usage-habit context-ratio calculation in `habits.py`; see
+  [Context window sizing](#context-window-sizing) above.
 
 Update `pricing.yaml` whenever Anthropic changes pricing — nothing in the
 code needs to change for a rate update.
