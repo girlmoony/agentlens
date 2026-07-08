@@ -52,20 +52,27 @@ def cmd_scan(args) -> None:
     total_cost = sum(s.total_cost for s in summaries)
     total_tokens = sum(s.input_tokens + s.output_tokens for s in summaries)
     finding_count = sum(len(s.findings) for s in summaries)
+    with_habits = [s for s in summaries if s.habit_metrics is not None]
+    avg_habit_score = (
+        sum(s.habit_metrics.habit_score for s in with_habits) / len(with_habits) if with_habits else None
+    )
 
     suffix = f" since {args.since}" if args.since else ""
     print(f"Scanned {len(summaries)} session(s){suffix}")
     print(f"  total cost:   ${total_cost:.4f}")
     print(f"  total tokens: {total_tokens:,}")
     print(f"  findings:     {finding_count}")
+    if avg_habit_score is not None:
+        print(f"  habit score:  {avg_habit_score:.0f}/100 (avg)")
     print()
 
     for s in sorted(summaries, key=lambda s: s.total_cost, reverse=True)[:20]:
         started = s.start.strftime("%Y-%m-%d %H:%M") if s.start else "?"
+        habit_score = s.habit_metrics.habit_score if s.habit_metrics is not None else 100
         print(
             f"  {s.session_id[:8]}  {started}  turns={s.turn_count:<3} tools={s.tool_call_count:<3} "
             f"tokens={s.input_tokens + s.output_tokens:<8,} cost=${s.total_cost:.4f}  "
-            f"findings={len(s.findings)}"
+            f"findings={len(s.findings)}  habit={habit_score}"
         )
 
     if args.json:
@@ -81,6 +88,13 @@ def cmd_scan(args) -> None:
                 "total_cost": s.total_cost,
                 "models_used": s.models_used,
                 "findings": s.findings,
+                "habit_score": s.habit_metrics.habit_score if s.habit_metrics is not None else None,
+                "peak_context_ratio": s.habit_metrics.peak_context_ratio if s.habit_metrics is not None else None,
+                "cache_hit_rate": s.habit_metrics.cache_hit_rate if s.habit_metrics is not None else None,
+                "topic_shift_count": s.habit_metrics.topic_shift_count if s.habit_metrics is not None else None,
+                "undisciplined_shift_count": (
+                    s.habit_metrics.undisciplined_shift_count if s.habit_metrics is not None else None
+                ),
             }
             for s in summaries
         ]
