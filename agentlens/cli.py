@@ -41,6 +41,30 @@ def _collect_summaries(since: Optional[datetime], projects_dir: Path):
     return summaries
 
 
+def summary_to_dict(s) -> dict:
+    """JSON-serializable shape for one SessionSummary. Shared by `scan --json`
+    and the MCP server (mcp_server.py) so both surfaces return identical data."""
+    return {
+        "session_id": s.session_id,
+        "project_dir": s.project_dir,
+        "started": s.start.isoformat() if s.start else None,
+        "turn_count": s.turn_count,
+        "tool_call_count": s.tool_call_count,
+        "input_tokens": s.input_tokens,
+        "output_tokens": s.output_tokens,
+        "total_cost": s.total_cost,
+        "models_used": s.models_used,
+        "findings": s.findings,
+        "habit_score": s.habit_metrics.habit_score if s.habit_metrics is not None else None,
+        "peak_context_ratio": s.habit_metrics.peak_context_ratio if s.habit_metrics is not None else None,
+        "cache_hit_rate": s.habit_metrics.cache_hit_rate if s.habit_metrics is not None else None,
+        "topic_shift_count": s.habit_metrics.topic_shift_count if s.habit_metrics is not None else None,
+        "undisciplined_shift_count": (
+            s.habit_metrics.undisciplined_shift_count if s.habit_metrics is not None else None
+        ),
+    }
+
+
 def cmd_scan(args) -> None:
     since = _parse_since(args.since) if args.since else None
     summaries = _collect_summaries(since, Path(args.projects_dir))
@@ -76,28 +100,7 @@ def cmd_scan(args) -> None:
         )
 
     if args.json:
-        payload = [
-            {
-                "session_id": s.session_id,
-                "project_dir": s.project_dir,
-                "started": s.start.isoformat() if s.start else None,
-                "turn_count": s.turn_count,
-                "tool_call_count": s.tool_call_count,
-                "input_tokens": s.input_tokens,
-                "output_tokens": s.output_tokens,
-                "total_cost": s.total_cost,
-                "models_used": s.models_used,
-                "findings": s.findings,
-                "habit_score": s.habit_metrics.habit_score if s.habit_metrics is not None else None,
-                "peak_context_ratio": s.habit_metrics.peak_context_ratio if s.habit_metrics is not None else None,
-                "cache_hit_rate": s.habit_metrics.cache_hit_rate if s.habit_metrics is not None else None,
-                "topic_shift_count": s.habit_metrics.topic_shift_count if s.habit_metrics is not None else None,
-                "undisciplined_shift_count": (
-                    s.habit_metrics.undisciplined_shift_count if s.habit_metrics is not None else None
-                ),
-            }
-            for s in summaries
-        ]
+        payload = [summary_to_dict(s) for s in summaries]
         print(json.dumps(payload, indent=2))
 
 
