@@ -109,6 +109,54 @@ class TestParseSession(unittest.TestCase):
         self.assertEqual(turn.cache_creation_5m_input_tokens, 400)
         self.assertEqual(turn.cache_creation_1h_input_tokens, 0)
 
+    def test_compact_boundary_recorded(self):
+        path = self._path()
+        lines = [
+            {"type": "system", "subtype": "compact_boundary", "timestamp": "2026-07-08T10:00:00Z", "content": "Conversation compacted"},
+            _assistant_event(
+                "msg_1", "2026-07-08T10:00:01Z", "claude-sonnet-5",
+                {"input_tokens": 1, "output_tokens": 1, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0},
+                [{"type": "text", "text": "ok"}],
+            ),
+        ]
+        _write_jsonl(lines, path)
+
+        session = parse_session(path)
+        self.assertEqual(len(session.boundaries), 1)
+        self.assertEqual(session.boundaries[0].kind, "compact")
+
+    def test_clear_command_recorded_as_boundary(self):
+        path = self._path()
+        lines = [
+            {
+                "type": "system", "subtype": "local_command", "timestamp": "2026-07-08T10:00:00Z",
+                "content": "<command-name>/clear</command-name>",
+            },
+            _assistant_event(
+                "msg_1", "2026-07-08T10:00:01Z", "claude-sonnet-5",
+                {"input_tokens": 1, "output_tokens": 1, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0},
+                [{"type": "text", "text": "ok"}],
+            ),
+        ]
+        _write_jsonl(lines, path)
+
+        session = parse_session(path)
+        self.assertEqual(len(session.boundaries), 1)
+        self.assertEqual(session.boundaries[0].kind, "clear")
+
+    def test_unrelated_local_command_not_recorded_as_boundary(self):
+        path = self._path()
+        lines = [
+            {
+                "type": "system", "subtype": "local_command", "timestamp": "2026-07-08T10:00:00Z",
+                "content": "<command-name>/model</command-name>",
+            },
+        ]
+        _write_jsonl(lines, path)
+
+        session = parse_session(path)
+        self.assertEqual(session.boundaries, [])
+
     def test_ignores_assistant_message_without_usage(self):
         path = self._path()
         line = {

@@ -10,6 +10,7 @@ message id — summing per-line would inflate token/cost totals several-fold.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -43,11 +44,21 @@ class Turn:
 
 
 @dataclass
+class Boundary:
+    """A context-resetting event within a session: a manual /clear (or /compact)
+    command, or an automatic compaction Claude Code triggered on its own."""
+
+    timestamp: Optional[datetime]
+    kind: str  # "clear" | "compact"
+
+
+@dataclass
 class Session:
     session_id: str
     project_dir: str
     file_path: Path
     turns: list = field(default_factory=list)
+    boundaries: list = field(default_factory=list)
 
     @property
     def start(self) -> Optional[datetime]:
@@ -129,6 +140,22 @@ def parse_session(file_path: Path) -> Session:
                 event = json.loads(line)
             except json.JSONDecodeError:
                 continue  # tolerate a truncated/corrupted trailing line
+
+            if event.get("type") == "system":
+                subtype = event.get("subtype")
+                if subtype == "compact_boundary":
+                    session.boundaries.append(
+                        Boundary(timestamp=_parse_timestamp(event.get("timestamp", "")), kind="compact")
+                    )
+                elif subtype == "local_command":
+                    content = event.get("content", "")
+                    if isinstance(content, str) and re.search(
+                        r"<command-name>\s*/(clear|compact)\s*</command-name>", content
+                    ):
+                        session.boundaries.append(
+                            Boundary(timestamp=_parse_timestamp(event.get("timestamp", "")), kind="clear")
+                        )
+                continue
 
             if event.get("type") != "assistant":
                 continue
