@@ -42,6 +42,8 @@ available history. `--projects-dir` overrides the default
 
 ## What it detects
 
+Agent/log-side waste (`metrics.py`):
+
 - **duplicate_read** — the same file read more than once in a session,
   a sign the model re-reads content it already had instead of relying on
   what's in context.
@@ -51,6 +53,51 @@ available history. `--projects-dir` overrides the default
 - **batchable_tool_calls** — runs of consecutive single-tool-call turns
   fired in rapid succession (within a few seconds of each other) that could
   likely have been batched into one turn instead.
+
+User-habit-side waste (`habits.py`) — cost driven by *how a session is
+driven*, rather than by what the agent does within it:
+
+- **context_budget_exceeded** — context usage (`input_tokens +
+  cache_read_input_tokens + cache_creation_input_tokens` for a turn, as a
+  fraction of a conservative 200K-token budget) peaked at 90%+, or stayed at
+  80%+ for 5+ consecutive turns, without a `/clear` or `/compact` in
+  between. Mirrors the 25/55/80/90% warning bands Claude Code's own
+  context-usage indicator uses. The 200K figure is a flat, conservative
+  default rather than the real context window of the model(s) used in the
+  session, so on models with a larger window the reported ratio can exceed
+  100% — read it as "how hot did this session run" rather than an exact
+  percentage of the actual limit.
+- **session_not_split** — the session changed topic (see below) at least
+  twice without a `/clear`, `/compact`, or new session in between, so
+  context kept accumulating across unrelated work instead of being reset.
+  A topic change is detected heuristically: consecutive file-referencing
+  turns whose directories have a Jaccard similarity below 0.2 are treated as
+  a topic shift.
+- **mixed_project_session** — two or more directories unrelated to the
+  session's own project (i.e. that don't share any of the project folder's
+  name tokens) were touched in the same session — a sign unrelated work got
+  mixed into one context instead of using a session per project.
+
+### Usage-habit score
+
+Each session gets a 0–100 **habit score**, starting at 100 and losing points
+for each habit finding above (15 for `session_not_split`, 20 for
+`context_budget_exceeded`, 15 for `mixed_project_session`), scaled by
+severity (0.6x low, 1x medium, 1.5x high) and floored at 0. It's a rough,
+at-a-glance signal for "was this session driven efficiently," not a
+precise cost figure — the findings and their `detail` text are the
+authoritative explanation. `scan` and `report` both show the average habit
+score across the scanned sessions, and the HTML report shows it per-session
+plus a breakdown of how many sessions hit each habit finding.
+
+The HTML report also charts, per flagged session: a **context growth
+timeline** (context-usage ratio per turn, with the 55/80/90% bands and the
+80%+ danger zone shaded) and a **topic timeline** — a Gantt-style view of
+each session's turns colored by topic zone, with a marker at every topic
+shift showing whether it was followed by a `/clear`/`/compact` (✓) or not
+(!, the "you probably wanted to start a new session here" signal). Two
+scatter plots round it out: cache hit rate vs. session length, and cost per
+API call (`total_cost / turn_count`) vs. peak context size.
 
 ## Pricing logic
 
