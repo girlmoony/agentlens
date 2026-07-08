@@ -1,1 +1,7 @@
 pyyaml>=6.0.2
+
+# MCP server (agentlens/mcp_server.py) — official Python SDK, confirmed on
+# PyPI (pypi.org/project/mcp). 1.28.1 is current as of 2026-07-08; >=1.2.0
+# is used as a floor since that's roughly when FastMCP's tool decorator API
+# stabilized.
+mcp>=1.2.0

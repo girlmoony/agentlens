@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentlens"
+version = "0.2.0"
+description = "Local cost & efficiency visibility for Claude Code sessions, with an MCP server for direct use from Claude Code, Codex CLI, GitHub Copilot, and other MCP clients."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.9"
+dependencies = [
+    "pyyaml>=6.0.2",
+    "mcp>=1.2.0",
+]
+
+[project.scripts]
+agentlens = "agentlens.cli:main"
+agentlens-mcp = "agentlens.mcp_server:main"
+
+[tool.setuptools.packages.find]
+include = ["agentlens*"]
