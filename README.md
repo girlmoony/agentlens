@@ -17,12 +17,18 @@ cost accounting directly against the log format Claude Code already writes.
 
 ## Installation
 
+Requires **Python 3.10+** — the `mcp` SDK used by the
+[MCP server](#mcp-server) below requires 3.10 or newer (every published
+`mcp` release does).
+
 ```bash
+python3 -m venv .venv
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
 No other setup is required — AgentLens only reads local files. This also
-installs the `mcp` SDK needed for the [MCP server](#mcp-server) below.
+installs the `mcp` SDK needed for the MCP server.
 
 To get the `agentlens` / `agentlens-mcp` console scripts (used in the MCP
 client config examples below), install the package itself instead:
@@ -30,6 +36,15 @@ client config examples below), install the package itself instead:
 ```bash
 pip install -e .
 ```
+
+> **`error: externally-managed-environment`?** Some Linux distributions
+> (Debian, Ubuntu, Fedora, etc.) and Homebrew's Python refuse a bare `pip
+> install` against the system Python (PEP 668). The virtual environment
+> above avoids this entirely — create and activate it first, then both
+> `pip install` commands work normally. If you really need to install
+> without a venv, `pip install --user -r requirements.txt` is the safer
+> fallback; `pip install --break-system-packages ...` also works but can
+> affect OS-managed Python packages.
 
 ## Usage
 
